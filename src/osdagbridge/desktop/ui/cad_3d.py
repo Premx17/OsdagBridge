@@ -1554,3 +1554,431 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+# ==============================================================================
+# DYNAMIC CAD PARAMETER MANAGER, EDITOR DIALOG & INTERACTOR
+# (Integrated into existing cad_3d.py architecture to avoid new file creation)
+# ==============================================================================
+
+from dataclasses import dataclass
+from typing import Dict, Any, Optional, Tuple, List, Callable
+from osdagbridge.core.utils.common import (
+    KEY_SPAN,
+    KEY_CARRIAGEWAY_WIDTH,
+    KEY_TS_GIRDER_SPACING,
+    KEY_TS_DECK_THICKNESS,
+    KEY_TS_DECK_OVERHANG,
+    KEY_TS_NO_OF_GIRDERS,
+)
+
+try:
+    from PySide6.QtWidgets import (
+        QDialog, QFormLayout, QLineEdit, QGroupBox, QMessageBox
+    )
+    from PySide6.QtCore import QObject, QEvent, Signal
+    HAS_PYSIDE6 = True
+except ImportError:
+    HAS_PYSIDE6 = False
+
+
+@dataclass
+class CADParameterSpec:
+    """Specification metadata for a bridge CAD parameter."""
+    key: str
+    display_name: str
+    unit: str
+    is_editable: bool
+    min_val: float
+    max_val: float
+    description: str
+    is_derived: bool = False
+    osdag_input_key: Optional[str] = None
+    input_unit_multiplier: float = 1.0
+
+
+PARAMETER_SPECS: Dict[str, CADParameterSpec] = {
+    'carriageway_width': CADParameterSpec(
+        key='carriageway_width',
+        display_name='Carriageway Width',
+        unit='mm',
+        is_editable=True,
+        min_val=1000.0,
+        max_val=50000.0,
+        description='Clear width of the roadway deck available for traffic',
+        is_derived=False,
+        osdag_input_key=KEY_CARRIAGEWAY_WIDTH,
+        input_unit_multiplier=0.001,
+    ),
+    'girder_spacing': CADParameterSpec(
+        key='girder_spacing',
+        display_name='Girder Spacing',
+        unit='mm',
+        is_editable=True,
+        min_val=500.0,
+        max_val=20000.0,
+        description='Center-to-center spacing between parallel girders',
+        is_derived=False,
+        osdag_input_key=KEY_TS_GIRDER_SPACING,
+        input_unit_multiplier=0.001,
+    ),
+    'deck_thickness': CADParameterSpec(
+        key='deck_thickness',
+        display_name='Deck Thickness',
+        unit='mm',
+        is_editable=True,
+        min_val=10.0,
+        max_val=2000.0,
+        description='Thickness of the concrete deck slab',
+        is_derived=False,
+        osdag_input_key=KEY_TS_DECK_THICKNESS,
+        input_unit_multiplier=1.0,
+    ),
+    'span_length': CADParameterSpec(
+        key='span_length',
+        display_name='Span Length',
+        unit='mm',
+        is_editable=True,
+        min_val=1000.0,
+        max_val=200000.0,
+        description='Total longitudinal span length of the bridge structure',
+        is_derived=False,
+        osdag_input_key=KEY_SPAN,
+        input_unit_multiplier=0.001,
+    ),
+    'deck_overhang': CADParameterSpec(
+        key='deck_overhang',
+        display_name='Overhang',
+        unit='mm',
+        is_editable=False,
+        min_val=0.0,
+        max_val=10000.0,
+        description='Cantilever deck overhang width beyond exterior girders (Derived parameter)',
+        is_derived=True,
+        osdag_input_key=KEY_TS_DECK_OVERHANG,
+        input_unit_multiplier=0.001,
+    ),
+    'overall_width': CADParameterSpec(
+        key='overall_width',
+        display_name='Overall Bridge Width',
+        unit='mm',
+        is_editable=False,
+        min_val=0.0,
+        max_val=100000.0,
+        description='Total width of the bridge superstructure (Derived parameter)',
+        is_derived=True,
+    ),
+    'cross_bracing_spacing': CADParameterSpec(
+        key='cross_bracing_spacing',
+        display_name='Bracing Spacing',
+        unit='mm',
+        is_editable=False,
+        min_val=0.0,
+        max_val=50000.0,
+        description='Spacing between cross bracing frames (Derived parameter)',
+        is_derived=True,
+    ),
+}
+
+KEY_ALIASES: Dict[str, str] = {
+    'span': 'span_length',
+    'span_length': 'span_length',
+    KEY_SPAN: 'span_length',
+    'carriageway_width': 'carriageway_width',
+    KEY_CARRIAGEWAY_WIDTH: 'carriageway_width',
+    'girder_spacing': 'girder_spacing',
+    KEY_TS_GIRDER_SPACING: 'girder_spacing',
+    'deck_thickness': 'deck_thickness',
+    KEY_TS_DECK_THICKNESS: 'deck_thickness',
+    'overhang': 'deck_overhang',
+    'deck_overhang': 'deck_overhang',
+    KEY_TS_DECK_OVERHANG: 'deck_overhang',
+    'overall_width': 'overall_width',
+    'overall_bridge_width': 'overall_width',
+    'bracing_spacing': 'cross_bracing_spacing',
+    'cross_bracing_spacing': 'cross_bracing_spacing',
+}
+
+
+class BridgeCADParameterManager:
+    """Manages bridge CAD parameter state, validation, isolation, and UI synchronization."""
+
+    def __init__(self, baseline_params: Optional[Dict[str, Any]] = None):
+        self._baseline_params: Dict[str, Any] = {}
+        self._edited_params: Dict[str, Any] = {}
+        self._listeners: List[Callable[[Dict[str, Any]], None]] = []
+
+        default_baseline = {
+            'span_length': 35000.0,
+            'carriageway_width': 10500.0,
+            'girder_spacing': 2750.0,
+            'deck_thickness': 200.0,
+            'deck_overhang': 1000.0,
+            'overall_width': 12500.0,
+            'cross_bracing_spacing': 3500.0,
+            'num_girders': 4,
+        }
+        if baseline_params:
+            self.set_baseline_params(baseline_params)
+        else:
+            self.set_baseline_params(default_baseline)
+
+    def normalize_key(self, key: str) -> str:
+        return KEY_ALIASES.get(key, key)
+
+    def set_baseline_params(self, params: Dict[str, Any]) -> None:
+        new_baseline = {}
+        for k, v in params.items():
+            norm_key = self.normalize_key(k)
+            try:
+                new_baseline[norm_key] = float(v) if isinstance(v, (int, float, str)) and str(v).replace('.', '', 1).isdigit() else v
+            except (ValueError, TypeError):
+                new_baseline[norm_key] = v
+        self._baseline_params = new_baseline
+        self._edited_params.clear()
+
+    def get_parameter_spec(self, key: str) -> Optional[CADParameterSpec]:
+        return PARAMETER_SPECS.get(self.normalize_key(key))
+
+    def is_editable(self, key: str) -> bool:
+        spec = self.get_parameter_spec(key)
+        return spec.is_editable if spec else False
+
+    def get_baseline_value(self, key: str) -> Any:
+        return self._baseline_params.get(self.normalize_key(key))
+
+    def get_current_value(self, key: str) -> Any:
+        norm_key = self.normalize_key(key)
+        return self._edited_params.get(norm_key, self._baseline_params.get(norm_key))
+
+    def validate_value(self, key: str, value: Any) -> Tuple[bool, Optional[float], str]:
+        norm_key = self.normalize_key(key)
+        spec = self.get_parameter_spec(norm_key)
+
+        if spec and not spec.is_editable:
+            return (False, None, f"Parameter '{spec.display_name}' is locked (read-only) to prevent geometric conflicts.")
+
+        if value is None or (isinstance(value, str) and value.strip() == ""):
+            return (False, None, f"Value for '{spec.display_name if spec else norm_key}' cannot be empty.")
+
+        try:
+            val_float = float(value)
+        except (ValueError, TypeError):
+            return (False, None, f"Invalid non-numeric value '{value}'.")
+
+        if val_float <= 0:
+            return (False, None, f"Value for '{spec.display_name if spec else norm_key}' must be positive.")
+
+        if spec and (val_float < spec.min_val or val_float > spec.max_val):
+            return (False, None, f"Value {val_float:.2f} {spec.unit} out of physical range [{spec.min_val:g}, {spec.max_val:g}].")
+
+        return (True, val_float, "")
+
+    def apply_edit(self, key: str, value: Any) -> Tuple[bool, str, Dict[str, Any]]:
+        norm_key = self.normalize_key(key)
+        is_valid, val_float, err_msg = self.validate_value(norm_key, value)
+        if not is_valid:
+            return (False, err_msg, self.get_cad_params())
+
+        self._edited_params[norm_key] = val_float
+        updated = self.get_cad_params()
+        spec = self.get_parameter_spec(norm_key)
+        return (True, f"Updated '{spec.display_name if spec else norm_key}' to {val_float:g}.", updated)
+
+    def reset_parameter(self, key: str) -> Dict[str, Any]:
+        norm_key = self.normalize_key(key)
+        if norm_key in self._edited_params:
+            del self._edited_params[norm_key]
+        return self.get_cad_params()
+
+    def get_cad_params(self) -> Dict[str, Any]:
+        combined = dict(self._baseline_params)
+        combined.update(self._edited_params)
+        for k in ['num_girders', KEY_TS_NO_OF_GIRDERS, 'num_bays']:
+            if k in combined and combined[k] is not None:
+                try:
+                    combined[k] = int(float(combined[k]))
+                except (ValueError, TypeError):
+                    combined[k] = 4
+        return combined
+
+    def get_main_ui_inputs(self) -> Dict[str, Any]:
+        current_cad = self.get_cad_params()
+        ui_inputs = {}
+        for norm_key, spec in PARAMETER_SPECS.items():
+            if spec.osdag_input_key and norm_key in current_cad:
+                raw_val = current_cad[norm_key]
+                ui_inputs[spec.osdag_input_key] = raw_val * spec.input_unit_multiplier if isinstance(raw_val, (int, float)) else raw_val
+        return ui_inputs
+
+
+if HAS_PYSIDE6:
+    class CADParameterEditorDialog(QDialog):
+        """Dialog window for editing or inspecting a single CAD parameter."""
+        parameter_updated = Signal(dict)
+
+        def __init__(self, parameter_key: str, manager: BridgeCADParameterManager, parent: Optional[QWidget] = None):
+            super().__init__(parent)
+            self.manager = manager
+            self.param_key = self.manager.normalize_key(parameter_key)
+            self.spec = self.manager.get_parameter_spec(self.param_key)
+            self.display_name = self.spec.display_name if self.spec else self.param_key.replace('_', ' ').title()
+            self.is_editable = self.manager.is_editable(self.param_key)
+            self.init_ui()
+
+        def init_ui(self):
+            self.setWindowTitle("CAD Parameter Editor")
+            self.setMinimumSize(440, 240)
+            self.setStyleSheet("""
+                QDialog { background-color: #ffffff; color: #111111; font-family: 'Segoe UI', Arial; }
+                QGroupBox { font-weight: bold; border: 1px solid #cccccc; border-radius: 6px; margin-top: 10px; padding-top: 10px; background-color: #ffffff; color: #111111; }
+                QLabel { color: #111111; font-size: 13px; }
+                QLineEdit { background-color: #ffffff; color: #111111; border: 1px solid #a0a0a0; border-radius: 4px; padding: 6px; font-size: 14px; font-weight: bold; }
+                QLineEdit:read-only { background-color: #e9ecef; color: #495057; }
+                QPushButton { border-radius: 4px; padding: 8px 16px; font-weight: bold; font-size: 13px; }
+            """)
+            layout = QVBoxLayout(self)
+            status_box = QGroupBox(f"{self.display_name}")
+            form_layout = QFormLayout(status_box)
+            cur_val = self.manager.get_current_value(self.param_key)
+            unit_str = f" ({self.spec.unit})" if self.spec and self.spec.unit else ""
+            
+            self.val_input = QLineEdit(f"{float(cur_val):.1f}" if cur_val is not None else "0.0")
+            if not self.is_editable:
+                self.val_input.setReadOnly(True)
+
+            form_layout.addRow(QLabel(f"{self.display_name}{unit_str}:"), self.val_input)
+            layout.addWidget(status_box)
+
+            self.status_msg = QLabel("")
+            self.status_msg.setWordWrap(True)
+            self.status_msg.hide()
+            layout.addWidget(self.status_msg)
+
+            btn_box = QHBoxLayout()
+            if self.is_editable:
+                self.btn_apply = QPushButton("Apply Edit")
+                self.btn_apply.setStyleSheet("background-color: #28a745; color: white;")
+                self.btn_apply.clicked.connect(self.on_apply)
+                btn_box.addWidget(self.btn_apply)
+
+                self.btn_reset = QPushButton("Reset")
+                self.btn_reset.setStyleSheet("background-color: #6c757d; color: white;")
+                self.btn_reset.clicked.connect(self.on_reset)
+                btn_box.addWidget(self.btn_reset)
+
+            btn_close = QPushButton("Close")
+            btn_close.clicked.connect(self.accept)
+            btn_box.addWidget(btn_close)
+            layout.addLayout(btn_box)
+
+        def on_apply(self):
+            val_text = self.val_input.text().strip()
+            success, msg, updated_params = self.manager.apply_edit(self.param_key, val_text)
+            if success:
+                self.status_msg.setText(f"✅ {msg}")
+                self.status_msg.setStyleSheet("color: #155724; background-color: #d4edda; padding: 6px;")
+                self.status_msg.show()
+                self.parameter_updated.emit(updated_params)
+            else:
+                self.status_msg.setText(f"❌ {msg}")
+                self.status_msg.setStyleSheet("color: #721c24; background-color: #f8d7da; padding: 6px;")
+                self.status_msg.show()
+
+        def on_reset(self):
+            updated_params = self.manager.reset_parameter(self.param_key)
+            baseline_val = self.manager.get_baseline_value(self.param_key)
+            if baseline_val is not None:
+                self.val_input.setText(f"{float(baseline_val):.1f}")
+            self.parameter_updated.emit(updated_params)
+
+
+    class CADCanvasDoubleClickHandler(QObject):
+        """Event filter attached to 2D CAD canvas views for interactive parameter editing."""
+
+        def __init__(self, target_widget: Any, manager: Optional[BridgeCADParameterManager] = None, sync_callback: Optional[Callable[[Dict[str, Any]], None]] = None):
+            super().__init__(target_widget if hasattr(target_widget, 'parent') else None)
+            self.target_widget = target_widget
+            self.manager = manager or BridgeCADParameterManager()
+            self.sync_callback = sync_callback
+            self.attach_to_widget(self.target_widget)
+
+        def attach_to_widget(self, widget: Any) -> None:
+            if widget is None:
+                return
+            try:
+                if hasattr(widget, 'installEventFilter') and callable(widget.installEventFilter):
+                    widget.installEventFilter(self)
+                if hasattr(widget, 'viewport') and callable(widget.viewport):
+                    vp = widget.viewport()
+                    if vp:
+                        vp.installEventFilter(self)
+                if hasattr(widget, 'cross_scroll'):
+                    self.attach_to_widget(widget.cross_scroll)
+                if hasattr(widget, 'top_scroll'):
+                    self.attach_to_widget(widget.top_scroll)
+                if hasattr(widget, 'cross_section_widget'):
+                    self.attach_to_widget(widget.cross_section_widget)
+                if hasattr(widget, 'top_view_widget'):
+                    self.attach_to_widget(widget.top_view_widget)
+                if hasattr(widget, 'children') and callable(widget.children):
+                    for child in widget.children():
+                        if hasattr(child, 'installEventFilter') and callable(child.installEventFilter):
+                            child.installEventFilter(self)
+            except Exception:
+                pass
+
+        def eventFilter(self, watched: Any, event: Any) -> bool:
+            if hasattr(event, 'type') and event.type() == QEvent.MouseButtonDblClick:
+                pos = getattr(event, 'pos', lambda: None)()
+                self._handle_double_click(watched, pos)
+                return True
+            return super().eventFilter(watched, event) if hasattr(super(), 'eventFilter') else False
+
+        def _detect_parameter(self, watched: Any, pos: Any) -> str:
+            watched_name = watched.__class__.__name__ if watched else ""
+            is_top_view = 'Top' in watched_name
+            is_cross_view = 'Cross' in watched_name
+            if pos and hasattr(watched, 'height') and callable(watched.height):
+                h = watched.height()
+                w = watched.width() if hasattr(watched, 'width') and callable(watched.width) else 1000
+                y = pos.y() if hasattr(pos, 'y') else h / 2
+                x = pos.x() if hasattr(pos, 'x') else w / 2
+
+                if is_cross_view:
+                    if y < h * 0.35: return 'carriageway_width'
+                    elif y < h * 0.55: return 'deck_thickness'
+                    elif x < w * 0.2: return 'deck_overhang'
+                    elif y > h * 0.8: return 'overall_width'
+                    else: return 'girder_spacing'
+
+                if is_top_view:
+                    if y > h * 0.7: return 'span_length'
+                    elif x < w * 0.4 and y > h * 0.5: return 'cross_bracing_spacing'
+                    elif x > w * 0.7: return 'girder_spacing'
+                    else: return 'span_length'
+
+            return 'span_length' if is_top_view else 'carriageway_width'
+
+        def _handle_double_click(self, watched: Any = None, pos: Any = None):
+            param_key = self._detect_parameter(watched, pos)
+            dialog = CADParameterEditorDialog(parameter_key=param_key, manager=self.manager, parent=self.target_widget if hasattr(self.target_widget, 'winId') else None)
+            dialog.parameter_updated.connect(self._on_parameters_updated)
+            dialog.exec()
+
+        def _on_parameters_updated(self, updated_params: Dict[str, Any]) -> None:
+            dual = self.target_widget
+            if hasattr(dual, 'cross_section_widget') and hasattr(dual.cross_section_widget, 'update_params'):
+                dual.cross_section_widget.update_params(updated_params)
+            if hasattr(dual, 'top_view_widget') and hasattr(dual.top_view_widget, 'update_params'):
+                dual.top_view_widget.update_params(updated_params)
+            if hasattr(dual, 'update_params') and callable(dual.update_params):
+                dual.update_params(updated_params)
+            if hasattr(dual, 'update') and callable(dual.update):
+                dual.update()
+            if hasattr(dual, 'cross_section_widget') and hasattr(dual.cross_section_widget, 'update'):
+                dual.cross_section_widget.update()
+            if hasattr(dual, 'top_view_widget') and hasattr(dual.top_view_widget, 'update'):
+                dual.top_view_widget.update()
+            if self.sync_callback and callable(self.sync_callback):
+                self.sync_callback(self.manager.get_main_ui_inputs())
