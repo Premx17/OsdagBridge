@@ -5,11 +5,40 @@ It supports desktop (PySide6), web (Django + React), and CLI interfaces through 
 
 The system currently supports:
 - Plate Girder Bridges  
- 
 
 Additional bridge types can be added through the plugin architecture.
 
 ---
+
+## Video Demonstration & Feature Walkthrough
+
+Watch the complete demonstration of all implemented features (Tasks I, II, and III):
+
+[![OsdagBridge Feature Walkthrough Video](https://img.youtube.com/vi/5nttxEFpHS0/hqdefault.jpg)](https://youtu.be/5nttxEFpHS0)
+
+**[Watch Video](https://youtu.be/5nttxEFpHS0)**
+
+---
+
+## Recent Feature Enhancements
+
+### Task I: Dynamic CAD Parameter Editor & Canvas Interactor
+- **2D Canvas Interactor**: Double-clicking anywhere on 2D CAD canvas views (Cross-Section & Top View) opens an interactive parameter editor.
+- **Write-Enabled vs. Read-Only Rules**:
+  - *Write-Enabled (Editable)*: Primary independent parameters such as Span Length, Carriageway Width, Girder Spacing, and Deck Thickness. Triggers real-time CAD model redraw and syncs values back to the main Input Dock.
+  - *Derived / Locked (Read-Only)*: Dependent parameters such as Cantilever Deck Overhang, Overall Width, and Bracing Spacing are locked to prevent geometric conflicts.
+- **High-Contrast Dialog UI**: Explicit contrast styling prevents white-on-white text readability issues under custom dark/light QSS themes.
+
+### Task II: Additional Inputs Validation & Unsaved Changes Warning
+- **Dirty State Tracking (`is_modified`)**: Tracks changes made across additional input controls.
+- **Unsaved Changes Prompt**: Intercepts dialog closure to display a confirmation warning (*Save & Close*, *Discard*, *Cancel*) if modifications are unsaved.
+- **Pre-Save Validation**: Blocks non-numeric strings, negative numbers, and empty fields before saving input settings.
+
+### Task III: Transverse Member Result Plotting & Analysis Dock Enhancements
+- **Transverse Member Selection**: Added `"Transverse Members"` to the Output Dock member selection dropdown for components such as End Diaphragms and Intermediate Cross Bracings.
+- **9 Response Quantities Plotting**: Supports 3D plotting across all 9 response quantities ($F_x, V_y, V_z, T_x, M_y, M_z, D_x, D_y, D_z$) along lateral $Z$-axis coordinates across the deck width.
+- **3-Tier Smart Loadcase Resolver**: Dynamically matches load combination dropdown selections (e.g. `SW`, `Basic ULS 1`) using exact matching, substring containment, and index mapping to update 3D diagrams and extreme value HUDs in real time.
+- **High-Contrast Output Dock**: Enhanced radio button grid layout and text visibility.
 
 ## Key Features
 
