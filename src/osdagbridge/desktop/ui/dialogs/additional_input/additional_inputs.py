@@ -58,6 +58,9 @@ class AdditionalInputs(QDialog):
         # Store all Compute functions to be called at Design
         self._compute_functions = []
 
+        # Track unsaved changes
+        self.is_modified = False
+
         self.setObjectName("AdditionalInputs")
         self.setMinimumSize(900, 520)
         
@@ -504,14 +507,178 @@ class AdditionalInputs(QDialog):
             if hasattr(tab_widget, "refresh_active_tab"):
                 tab_widget.refresh_active_tab()
 
+    def closeEvent(self, event):
+        """Override closeEvent: prompt user if unsaved changes exist."""
+        if getattr(self, "is_modified", False):
+            box = CustomMessageBox(
+                title="Unsaved Changes",
+                text="You have unsaved changes. Closing this window will discard them. Do you want to proceed?",
+                buttons=["Discard", "Cancel"],
+                dialogType=MessageBoxType.Warning,
+            )
+            result = box.exec()
+            if result == "Discard":
+                self.is_modified = False
+                event.accept()
+            else:
+                event.ignore()
+        else:
+            event.accept()
+
+    def _get_parameter_name_by_key(self, key: str, parent_widget=None) -> str:
+        """
+        Dynamically resolve parameter label name for a key using central ADDITIONAL_INPUTS_SCHEMA
+        and common.py definitions without hardcoding strings.
+        """
+        if not key:
+            return "Parameter"
+
+        def search_schema(schema_item):
+            if isinstance(schema_item, dict):
+                if schema_item.get("id") == key or schema_item.get("key") == key:
+                    lbl = schema_item.get("label")
+                    if lbl:
+                        return lbl
+                for v in schema_item.values():
+                    res = search_schema(v)
+                    if res:
+                        return res
+            elif isinstance(schema_item, list):
+                for item in schema_item:
+                    res = search_schema(item)
+                    if res:
+                        return res
+            return None
+
+        found_label = search_schema(ADDITIONAL_INPUTS_SCHEMA)
+        if found_label:
+            return found_label.rstrip(":").strip()
+
+        if parent_widget:
+            for lbl in parent_widget.findChildren(QLabel):
+                txt = lbl.text().rstrip(":").strip()
+                if txt and txt not in ("Custom", "Mode", "Type"):
+                    return txt
+
+        return key.split(".")[-1].replace("_", " ").title()
+
+    def _validate_custom_fields(self) -> list[str]:
+        """
+        Check all active tabs for empty custom fields.
+        If a parameter selection mode is set to 'Custom' but its corresponding input field is empty,
+        return an error message formatted as: "The custom value for '[Parameter Name]' cannot be empty."
+        """
+        errors = []
+
+        custom_group_mappings = [
+            {
+                "type_key": KEY_CB_TYPE,
+                "fields": [
+                    (KEY_CB_WIDTH, "Crash Barrier Width"),
+                    (KEY_CB_HEIGHT, "Crash Barrier Height"),
+                    (KEY_CB_AREA, "Crash Barrier Area"),
+                    (KEY_CB_DENSITY, "Crash Barrier Material Density"),
+                ]
+            },
+            {
+                "type_key": KEY_RL_TYPE,
+                "fields": [
+                    (KEY_RL_WIDTH, "Railing Width"),
+                    (KEY_RL_HEIGHT, "Railing Height"),
+                ]
+            },
+            {
+                "type_key": KEY_MD_TYPE,
+                "fields": [
+                    (KEY_MD_WIDTH, "Median Width"),
+                    (KEY_MD_HEIGHT, "Median Height"),
+                ]
+            },
+            {
+                "type_key": KEY_GIRDER,
+                "fields": [
+                    (KEY_MATERIAL_GIRDER_FY, "Girder Yield Strength (fy)"),
+                    (KEY_MATERIAL_GIRDER_FU, "Girder Ultimate Strength (fu)"),
+                    (KEY_MATERIAL_GIRDER_E, "Girder Modulus of Elasticity (E)"),
+                    (KEY_MATERIAL_GIRDER_G, "Girder Shear Modulus (G)"),
+                    (KEY_MATERIAL_GIRDER_DENSITY, "Girder Material Density"),
+                ]
+            },
+            {
+                "type_key": KEY_DECK,
+                "fields": [
+                    (KEY_MATERIAL_DECK_FCK, "Deck Concrete Grade (fck)"),
+                    (KEY_MATERIAL_DECK_ECM, "Deck Modulus of Elasticity (Ecm)"),
+                    (KEY_MATERIAL_DECK_DENSITY, "Deck Concrete Density"),
+                ]
+            },
+            {
+                "type_key": KEY_CROSS_BRACING,
+                "fields": [
+                    (KEY_MATERIAL_CROSS_BRACING_FY, "Cross Bracing Yield Strength (fy)"),
+                    (KEY_MATERIAL_CROSS_BRACING_FU, "Cross Bracing Ultimate Strength (fu)"),
+                    (KEY_MATERIAL_CROSS_BRACING_E, "Cross Bracing Modulus of Elasticity (E)"),
+                    (KEY_MATERIAL_CROSS_BRACING_DENSITY, "Cross Bracing Material Density"),
+                ]
+            },
+            {
+                "type_key": KEY_END_DIAPHRAGM,
+                "fields": [
+                    (KEY_MATERIAL_END_DIAPHRAGM_FY, "End Diaphragm Yield Strength (fy)"),
+                    (KEY_MATERIAL_END_DIAPHRAGM_FU, "End Diaphragm Ultimate Strength (fu)"),
+                    (KEY_MATERIAL_END_DIAPHRAGM_E, "End Diaphragm Modulus of Elasticity (E)"),
+                    (KEY_MATERIAL_END_DIAPHRAGM_DENSITY, "End Diaphragm Material Density"),
+                ]
+            },
+        ]
+
+        for group in custom_group_mappings:
+            type_val = self.working_input_dict.get(group["type_key"])
+            if type_val == "Custom":
+                for field_key, default_label in group["fields"]:
+                    val = self.working_input_dict.get(field_key)
+                    if val is None or str(val).strip() == "":
+                        param_name = self._get_parameter_name_by_key(field_key) or default_label
+                        err = f"The custom value for '{param_name}' cannot be empty."
+                        if err not in errors:
+                            errors.append(err)
+
+        if hasattr(self, "findChildren") and callable(getattr(self, "findChildren", None)):
+            try:
+                for combo in self.findChildren(QComboBox):
+                    if combo.isEnabled() and combo.currentText().strip() == "Custom":
+                        combo_key = combo.objectName()
+                        parent = combo.parentWidget()
+                        if parent:
+                            line_edits = [le for le in parent.findChildren(QLineEdit) if le.isEnabled() and le.isVisible()]
+                            for le in line_edits:
+                                if le.text().strip() == "":
+                                    le_key = le.objectName() or combo_key
+                                    param_name = self._get_parameter_name_by_key(le_key, parent)
+                                    err = f"The custom value for '{param_name}' cannot be empty."
+                                    if err not in errors:
+                                        errors.append(err)
+            except Exception:
+                pass
+
+        return errors
+
     # ── Dialog Persistence ───────────────────────────────────────────────────────
 
     def _save_inputs(self):  # on_change: validates all tabs then commits working_input_dict and emits CAD update signal
+        # Pre-Save Custom-Field Validation
+        custom_errors = self._validate_custom_fields()
+        if custom_errors:
+            message = "\n".join(custom_errors)
+            CustomMessageBox(
+                title="Validation Error",
+                text=message,
+                buttons=["OK"],
+                dialogType=MessageBoxType.Critical,
+            ).exec()
+            return  # Halt save process immediately if custom validation fails
 
         # Flush the currently-displayed stiffener member's widgets before committing.
-        # _save_stiffener_member_data otherwise only runs when switching *away* from a
-        # member (via _on_stiffener_member_load), so the last-viewed girder (e.g. G4)
-        # would never be persisted. This gives it the same save the other girders get.
         combo = self.findChild(QComboBox, KEY_MP_STIFFENER_SELECT_MEMBER_ID)
         if combo and combo.currentText().strip():
             self._save_stiffener_member_data(combo.currentText().strip())
@@ -521,6 +688,8 @@ class AdditionalInputs(QDialog):
         cad = self.findChild(CrossSectionCADWidget, KEY_TS_CAD_PREVIEW)
         if cad:
             self.update_template_page_2d_cad.emit(cad.params)
+
+        self.is_modified = False  # Reset unsaved changes flag upon successful save
         
         CustomMessageBox(
             title="Saved",
@@ -598,6 +767,7 @@ class AdditionalInputs(QDialog):
         self._update_additional_input_cad()
 
     def _update_input_dict(self, key: str, value: str):  # utility: writes a value to working_input_dict, falling back to default if empty
+        self.is_modified = True
         if value is None or value == "":
             self.working_input_dict[key] = self.default_input_dict.get(key)
         else:
