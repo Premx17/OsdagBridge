@@ -366,7 +366,8 @@ class CustomRadioButton(QRadioButton):
     def _doc(self) -> QTextDocument:
         doc = QTextDocument()
         doc.setDefaultFont(self.font())
-        doc.setHtml(self._rich_text)
+        styled_html = f"<span style='color: #111111; font-weight: bold;'>{self._rich_text}</span>"
+        doc.setHtml(styled_html)
         return doc
  
     # ── Paint ────────────────────────────────────────────────────────────────
