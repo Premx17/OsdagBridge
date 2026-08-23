@@ -356,54 +356,61 @@ class MplPlotWidget(QWidget):
         if hasattr(self, "_navcube"):
             self._navcube.hide()
 
+    def _dock_target(self, dock=None):
+        target_dock = dock if dock is not None else self._output_dock
+        if target_dock is None:
+            return None
+        return getattr(target_dock, "output_widget", target_dock)
+
     def _disconnect_output_dock_signals(self):
         """Disconnect all signals wired in link_output_dock() to prevent dangling refs."""
-        if self._output_dock is None:
+        target = self._dock_target()
+        if target is None:
             return
         from osdagbridge.desktop.ui.utils.custom_widgets import CustomRadioButton
 
-        combo_lc = self._output_dock.output_widget.findChild(QComboBox, "analysis.load_combination")
+        combo_lc = target.findChild(QComboBox, "analysis.load_combination")
         if combo_lc is not None:
             try:
                 combo_lc.currentTextChanged.disconnect(self.update_plot)
-            except RuntimeError:
+            except (RuntimeError, TypeError):
                 pass
 
-        combo_member = self._output_dock.output_widget.findChild(QComboBox, "analysis.member")
+        combo_member = target.findChild(QComboBox, "analysis.member")
         if combo_member is not None:
             try:
                 combo_member.currentTextChanged.disconnect(self.update_plot)
-            except RuntimeError:
+            except (RuntimeError, TypeError):
                 pass
 
-        for rb in self._output_dock.output_widget.findChildren(CustomRadioButton):
+        for rb in target.findChildren(CustomRadioButton):
             if rb.text() in _RICH_LABEL_TO_FORCE:
                 try:
                     rb.toggled.disconnect(self.update_plot)
-                except RuntimeError:
+                except (RuntimeError, TypeError):
                     pass
 
-        for cb in self._output_dock.output_widget.findChildren(QCheckBox):
+        for cb in target.findChildren(QCheckBox):
             text = cb.text().strip().lower()
             if "summary" in text:
                 try:
                     cb.toggled.disconnect(self._on_summary_toggled)
-                except RuntimeError:
+                except (RuntimeError, TypeError):
                     pass
             elif "max" in text:
                 try:
                     cb.toggled.disconnect(self._on_max_toggled)
-                except RuntimeError:
+                except (RuntimeError, TypeError):
                     pass
             elif "min" in text:
                 try:
                     cb.toggled.disconnect(self._on_min_toggled)
-                except RuntimeError:
+                except (RuntimeError, TypeError):
                     pass
             elif "all" in text:
                 try:
                     cb.toggled.disconnect(self._on_all_vals_toggled)
-                except RuntimeError:
+                except (RuntimeError, TypeError):
                     pass
 
     def setup(self, ds_all, loadcases: list, nodes: dict, members: dict,
@@ -427,13 +434,17 @@ class MplPlotWidget(QWidget):
 
     def link_output_dock(self, output_dock):
         self._output_dock = output_dock
+        target = self._dock_target(output_dock)
+        if target is None:
+            return
 
         # 1. Connect Load Combinations
-        combo_lc = output_dock.output_widget.findChild(QComboBox, "analysis.load_combination")
+        combo_lc = target.findChild(QComboBox, "analysis.load_combination")
+        if combo_lc is None:
+            from osdagbridge.core.utils.common import KEY_ANALYSIS_LOAD_COMBINATION, KEY_OUTPUT_DOCK_LOAD_COMBINATION
+            combo_lc = target.findChild(QComboBox, KEY_ANALYSIS_LOAD_COMBINATION) or target.findChild(QComboBox, KEY_OUTPUT_DOCK_LOAD_COMBINATION)
+
         if combo_lc is not None:
-            # Hide the per-position moving load cases ("Moving Case1", ...) —
-            # they are numerous and clutter the dropdown. The dataset still
-            # retains them; they are simply not offered for selection here.
             visible_loadcases = [
                 lc for lc in self._loadcases
                 if not str(lc).strip().lower().startswith("moving case")
@@ -445,18 +456,22 @@ class MplPlotWidget(QWidget):
             combo_lc.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
             combo_lc.setMinimumContentsLength(12)
             combo_lc.currentTextChanged.connect(self.update_plot)
+            combo_lc.currentIndexChanged.connect(lambda _idx: self.update_plot())
 
         # Connect Analysis Member Dropdown
-        combo_member = output_dock.output_widget.findChild(QComboBox, "analysis.member")
+        combo_member = target.findChild(QComboBox, "analysis.member")
+        if combo_member is None:
+            from osdagbridge.core.utils.common import KEY_ANALYSIS_MEMBER
+            combo_member = target.findChild(QComboBox, KEY_ANALYSIS_MEMBER)
+
         if combo_member is not None:
             combo_member.currentTextChanged.connect(self.update_plot)
-            # Make sure it fires an update if changed from UI, since grillage might be active
             combo_member.currentTextChanged.connect(lambda text: self._on_grillage_toggled(self._grillage_mode) if self._grillage_mode else None)
 
         # 2. Connect Force Radios
         from osdagbridge.desktop.ui.utils.custom_widgets import CustomRadioButton
         force_rbs = [
-            rb for rb in output_dock.output_widget.findChildren(CustomRadioButton)
+            rb for rb in target.findChildren(CustomRadioButton)
             if rb.text() in _RICH_LABEL_TO_FORCE
         ]
         for rb in force_rbs:
@@ -467,7 +482,7 @@ class MplPlotWidget(QWidget):
         self._cb_max = None
         self._cb_min = None
 
-        for cb in output_dock.output_widget.findChildren(QCheckBox):
+        for cb in target.findChildren(QCheckBox):
             text = cb.text().strip().lower()
             if "summary" in text:
                 cb.toggled.connect(self._on_summary_toggled)
@@ -501,9 +516,13 @@ class MplPlotWidget(QWidget):
         self.update_plot()
 
     def _current_member(self):
-        if self._output_dock is None:
+        target = self._dock_target()
+        if target is None:
             return "All"
-        combo_member = self._output_dock.output_widget.findChild(QComboBox, "analysis.member")
+        combo_member = target.findChild(QComboBox, "analysis.member")
+        if combo_member is None:
+            from osdagbridge.core.utils.common import KEY_ANALYSIS_MEMBER
+            combo_member = target.findChild(QComboBox, KEY_ANALYSIS_MEMBER)
         if combo_member and combo_member.currentText() != "-":
             return combo_member.currentText()
         return "All"
@@ -522,7 +541,42 @@ class MplPlotWidget(QWidget):
         if not loadcase or not force_key:
             return
 
-        ds = self._ds_all.sel(Loadcase=loadcase)
+        if "Loadcase" in self._ds_all.coords:
+            all_lcs = list(self._ds_all.coords["Loadcase"].values)
+            matched = None
+
+            # Match 1: Exact / Case-insensitive match
+            for lc in all_lcs:
+                if str(lc).strip().lower() == str(loadcase).strip().lower():
+                    matched = lc
+                    break
+
+            # Match 2: Substring containment (e.g., "SW" in "Girder Self Weight")
+            if matched is None:
+                for lc in all_lcs:
+                    s_lc = str(lc).strip().lower()
+                    s_sel = str(loadcase).strip().lower()
+                    if s_sel in s_lc or s_lc in s_sel:
+                        matched = lc
+                        break
+
+            # Match 3: Combo dropdown current index
+            if matched is None:
+                target_dock = self._dock_target()
+                if target_dock is not None:
+                    combo = target_dock.findChild(QComboBox, "analysis.load_combination")
+                    if combo is None:
+                        from osdagbridge.core.utils.common import KEY_ANALYSIS_LOAD_COMBINATION, KEY_OUTPUT_DOCK_LOAD_COMBINATION
+                        combo = target_dock.findChild(QComboBox, KEY_ANALYSIS_LOAD_COMBINATION) or target_dock.findChild(QComboBox, KEY_OUTPUT_DOCK_LOAD_COMBINATION)
+                    if combo and 0 <= combo.currentIndex() < len(all_lcs):
+                        matched = all_lcs[combo.currentIndex()]
+
+            if matched is not None:
+                ds = self._ds_all.sel(Loadcase=matched)
+            else:
+                ds = self._ds_all.isel(Loadcase=0)
+        else:
+            ds = self._ds_all
         
         old_elev, old_azim = None, None
         if hasattr(self, '_fig') and self._fig and self._fig.axes:
@@ -1477,14 +1531,21 @@ class MplPlotWidget(QWidget):
         return f"Scale: 1 cm = {real_per_cm:.3g} {unit}"
 
     def _current_loadcase(self) -> str:
-        combo = self._output_dock.output_widget.findChild(
-            QComboBox, "analysis.load_combination"
-        )
-        return combo.currentText() if combo else (self._loadcases[0] if self._loadcases else "")
+        target = self._dock_target()
+        if target is None:
+            return self._loadcases[0] if self._loadcases else ""
+        combo = target.findChild(QComboBox, "analysis.load_combination")
+        if combo is None:
+            from osdagbridge.core.utils.common import KEY_ANALYSIS_LOAD_COMBINATION, KEY_OUTPUT_DOCK_LOAD_COMBINATION
+            combo = target.findChild(QComboBox, KEY_ANALYSIS_LOAD_COMBINATION) or target.findChild(QComboBox, KEY_OUTPUT_DOCK_LOAD_COMBINATION)
+        return combo.currentText() if combo and combo.currentText() != "-" else (self._loadcases[0] if self._loadcases else "")
 
     def _current_force_key(self) -> str:
+        target = self._dock_target()
+        if target is None:
+            return "Fy"
         from osdagbridge.desktop.ui.utils.custom_widgets import CustomRadioButton
-        for rb in self._output_dock.output_widget.findChildren(CustomRadioButton):
+        for rb in target.findChildren(CustomRadioButton):
             if rb.isChecked() and rb.text() in _RICH_LABEL_TO_FORCE:
                 return _RICH_LABEL_TO_FORCE[rb.text()]
         return "Fy"
