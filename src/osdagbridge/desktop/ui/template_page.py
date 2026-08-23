@@ -347,6 +347,14 @@ class CustomWindow(QWidget):
 
         # CAD widget
         self.cad_comp_widget = BridgeDualCADWidget(self)
+        try:
+            from osdagbridge.desktop.ui.cad_3d import CADCanvasDoubleClickHandler
+            self._cad_interactor = CADCanvasDoubleClickHandler(
+                target_widget=self.cad_comp_widget,
+                sync_callback=lambda inputs: self.input_dock.update_inputs(inputs) if hasattr(self, 'input_dock') and hasattr(self.input_dock, 'update_inputs') else None
+            )
+        except Exception:
+            pass
         self.cad_comp_widget.setSizePolicy(
             QSizePolicy.Expanding, QSizePolicy.Expanding
         )
